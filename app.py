@@ -1,5 +1,6 @@
 import streamlit as st
 from auth_handler import AuthHandler
+from character_service import CharacterService
 from mud_client import MUDClient, GameConfig, GameState
 
 
@@ -168,6 +169,115 @@ def render_auth_page(auth_handler: AuthHandler):
         render_signin_form(auth_handler)
 
 
+def render_character_creation(auth_handler: AuthHandler, character_service: CharacterService):
+    """Render character creation form"""
+    st.header("Create New Character")
+    with st.form("character_creation"):
+        col1, col2 = st.columns(2)
+
+        with col1:
+            first_name = st.text_input("First Name")
+            race = st.selectbox("Race", ['HUMAN', 'ELF', 'DWARF', 'ORC', 'ANDROID'])
+
+        with col2:
+            character_class = st.selectbox("Class", ['WARRIOR', 'MAGE', 'ROGUE', 'ENGINEER', 'PSION'])
+
+            # Show roll results section
+            if 'attribute_rolls' not in st.session_state:
+                st.session_state.attribute_rolls = []
+                st.session_state.roll_count = 0
+
+            if st.form_submit_button("Roll Attributes"):
+                if st.session_state.roll_count < 3:
+                    # Call backend to get roll results
+                    success, result = character_service.roll_attributes(auth_handler.get_current_user().id)
+                    if success:
+                        st.session_state.attribute_rolls.append(result)
+                        st.session_state.roll_count += 1
+
+            # Display rolls if any exist
+            if st.session_state.attribute_rolls:
+                st.write("Your rolls:")
+                for i, roll in enumerate(st.session_state.attribute_rolls):
+                    st.write(f"Roll {i + 1}:", roll)
+
+                # Let user select which roll to use
+                selected_roll = st.selectbox("Select roll to use", range(1, len(st.session_state.attribute_rolls) + 1))
+
+        create_button = st.form_submit_button("Create Character")
+
+        if create_button:
+            if not first_name:
+                st.error("Please enter a character name")
+                return
+
+            if not hasattr(st.session_state, 'attribute_rolls') or not st.session_state.attribute_rolls:
+                st.error("Please roll for attributes first")
+                return
+
+            # Send character creation request to backend
+            success, result = character_service.create_character(
+                owner_id=auth_handler.get_current_user().id,
+                first_name=first_name,
+                race=race,
+                character_class=character_class,
+                attributes=st.session_state.attribute_rolls[selected_roll - 1]
+            )
+
+            if success:
+                st.success("Character created successfully!")
+                # Clear the creation state
+                st.session_state.pop('attribute_rolls', None)
+                st.session_state.pop('roll_count', None)
+                st.session_state.show_character_creation = False
+                st.rerun()
+            else:
+                st.error(result)
+
+
+def render_character_selection(auth_handler: AuthHandler, character_service: CharacterService):
+    st.header("Character Selection")
+
+    # Get user's characters from backend
+    success, result = character_service.get_characters(auth_handler.get_current_user().id)
+
+    if not success:
+        if "Character not found" in result:  # Or whatever error indicates no characters
+            if st.button("Create Your First Character"):
+                st.session_state.show_character_creation = True
+
+            if st.session_state.get('show_character_creation', False):
+                render_character_creation(auth_handler, character_service)
+            return None
+        else:
+            st.error(result)
+            return None
+
+    # Display existing characters
+    characters = result
+    if characters:
+        st.write("Select a character:")
+        print("Debug - Available characters:", characters)  # Debug print
+        for char in characters:
+            col1, col2, col3 = st.columns([3, 2, 1])
+            with col1:
+                st.write(f"{char['first_name']}")
+            with col2:
+                st.write(f"Level {char['level']} {char['race']} {char['class']}")
+            with col3:
+                if st.button("Select", key=f"select_{char['id']}"):
+                    print(f"Debug - Selected character: {char}")  # Debug print
+                    return char  # Just return the character, game interface handles joining
+
+    if st.button("Create New Character"):
+        st.session_state.show_character_creation = True
+
+    if st.session_state.get('show_character_creation', False):
+        render_character_creation(auth_handler, character_service)
+
+    return None
+
+
 def render_game_interface(auth_handler: AuthHandler):
     user = auth_handler.get_current_user()
 
@@ -182,28 +292,69 @@ def render_game_interface(auth_handler: AuthHandler):
     with st.sidebar:
         st.header("User Info")
         st.write(f"Email: {user.email}")
+        if 'active_character' in st.session_state:
+            st.write(f"Character: {st.session_state.active_character.get('first_name', '')}")
         if st.button("Sign Out"):
             success, message = auth_handler.sign_out()
             if success:
+                # Clear session state on logout
+                for key in ['client', 'game_state', 'active_character']:
+                    st.session_state.pop(key, None)
                 st.rerun()
             else:
                 st.error(message)
 
-    # Main game area with compact title
-    st.title("MUD Game Terminal")
-
-    # Initialize game connection if needed
-    if "client" not in st.session_state:
+    # Initialize services if needed
+    if 'character_service' not in st.session_state:
         config = GameConfig.from_ini()
-        client = MUDClient(config)
-        username = user.email.split('@')[0]
-        success, message = client.join_game(username)
-        if success:
-            st.session_state.client = client
-            st.session_state.game_state.add_message(message)
-        else:
+        st.session_state.character_service = CharacterService(config.base_url)
+
+    # Character selection if no character is active
+    if 'active_character' not in st.session_state:
+        character = render_character_selection(auth_handler, st.session_state.character_service)
+        if character:
+            print(f"Selected character data: {character}")  # Debug print
+            # Ensure character ID is string
+            character['id'] = str(character['id'])
+            st.session_state.active_character = character
+            # Initialize the game client when character is selected
+            config = GameConfig.from_ini()
+            st.session_state.client = MUDClient(config)
+            # Store user info from auth handler
+            st.session_state.user = auth_handler.get_current_user()
+            success, message = st.session_state.client.join_game(
+                player_id=str(character['id']),  # Explicitly convert to string
+                user_id=auth_handler.get_current_user().id
+            )
+            if success:
+                st.session_state.game_state.add_message(message, "system")
+                st.rerun()
+            else:
+                st.error(message)
+                # Clean up on failure
+                st.session_state.pop('active_character', None)
+                st.session_state.pop('client', None)
+                return
+        return
+
+    # Initialize client if missing (e.g., after page refresh)
+    if 'client' not in st.session_state and 'active_character' in st.session_state:
+        config = GameConfig.from_ini()
+        st.session_state.client = MUDClient(config)
+        # Ensure we're using string ID
+        player_id = str(st.session_state.active_character['id'])
+        success, message = st.session_state.client.join_game(
+            player_id=player_id,
+            user_id=auth_handler.get_current_user().id
+        )
+        if not success:
             st.error(message)
+            st.session_state.pop('active_character', None)
+            st.rerun()
             return
+
+    # Main game area - only show if character is selected and client is initialized
+    st.title("MUD Game Terminal")
 
     # Terminal display area
     terminal_html = "<div class='terminal-container'>"
@@ -214,13 +365,14 @@ def render_game_interface(auth_handler: AuthHandler):
     st.markdown(terminal_html, unsafe_allow_html=True)
 
     # Command input
-    st.text_input(
-        "",
-        key="command_input",
-        placeholder="Enter command...",
-        on_change=handle_command,
-        label_visibility="collapsed"
-    )
+    if 'client' in st.session_state:  # Only show input if client is initialized
+        st.text_input(
+            "",
+            key="command_input",
+            placeholder="Enter command...",
+            on_change=handle_command,
+            label_visibility="collapsed"
+        )
 
 
 def main():
