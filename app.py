@@ -177,10 +177,10 @@ def render_character_creation(auth_handler: AuthHandler, character_service: Char
 
         with col1:
             first_name = st.text_input("First Name")
-            race = st.selectbox("Race", ['HUMAN', 'ELF', 'DWARF', 'ORC', 'ANDROID'])
+            race = st.selectbox("Race", ['HUMAN', 'DRACONIAN', 'SYNTH', 'CONSTRUCT', 'ANDROID'])
 
         with col2:
-            character_class = st.selectbox("Class", ['WARRIOR', 'MAGE', 'ROGUE', 'ENGINEER', 'PSION'])
+            character_class = st.selectbox("Class", ['SOLDIER', 'PILOT', 'HACKER', 'ENGINEER', 'MEDIC'])
 
             # Show roll results section
             if 'attribute_rolls' not in st.session_state:

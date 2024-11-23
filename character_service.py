@@ -2,6 +2,7 @@ import os
 from supabase import create_client, Client
 from typing import Dict, List, Tuple
 import requests
+import uuid
 
 
 class CharacterService:
@@ -17,9 +18,7 @@ class CharacterService:
             response = self.supabase.from_('character').select(
                 'id, first_name, race, class, level'
             ).eq('owner_id', owner_id).execute()
-            # Convert id to string before returning
-            for char in response.data:
-                char['id'] = str(char['id'])
+
             return True, response.data
         except Exception as e:
             print(f"Error getting characters: {e}")
@@ -29,62 +28,69 @@ class CharacterService:
                          race: str, character_class: str,
                          attributes: Dict) -> Tuple[bool, Dict | str]:
         try:
-            # Check if name exists
+            # Name check first
             name_check = self.supabase.from_('character').select(
                 'first_name'
-            ).eq('first_name', first_name).execute()
+            ).ilike('first_name', first_name).execute()
 
             if name_check.data:
+                print(f"Name check failed: {first_name} already exists")
                 return False, "Character name already exists"
 
-            # First create character in game server (Dropwizard)
+            # Generate UUID for new character
+            character_id = str(uuid.uuid4())
+
+            # Create character in database first
+            character_data = {
+                'id': character_id,
+                'owner_id': owner_id,
+                'first_name': first_name,
+                'last_name': None,
+                'race': race,
+                'class': character_class,
+                'attributes': attributes,
+                'level': 1,
+                'credits': 100,
+                'health': 100,
+                'energy': 100
+            }
+
+            # Insert into Supabase
+            db_response = self.supabase.from_('character').insert(
+                character_data
+            ).execute()
+            print(f"Create character response from Supabase: {db_response.data}")
+
+            if not db_response.data:
+                return False, "Failed to create character in database"
+
+            # Create in game server - single create call
             game_request = {
+                "id": character_id,
                 "ownerId": owner_id,
                 "firstName": first_name,
-                "lastName": "",  # Default empty last name
+                "lastName": "",
                 "race": race,
                 "characterClass": character_class,
                 "attributes": attributes
             }
 
-            try:
-                game_response = requests.post(
-                    f"{self.game_base_url}/game/characters",
-                    json=game_request
-                )
-                if game_response.status_code != 200:
-                    return False, f"Failed to create character in game server: {game_response.text}"
+            game_response = requests.post(
+                f"{self.game_base_url}/game/characters",
+                json=game_request
+            )
 
-                game_character = game_response.json()
-            except Exception as e:
-                return False, f"Error creating character in game server: {str(e)}"
+            print(f"Game server response: {game_response.text}")
 
-            # Then store in Supabase
-            character_data = {
-                'owner_id': owner_id,
-                'first_name': first_name,
-                'race': race,
-                'class': character_class,
-                'attributes': attributes,
-                'level': 1,
-                'game_id': str(game_character.get('id'))  # Store the game server's ID
-            }
+            if game_response.status_code != 200:
+                # Clean up database if game server fails
+                self.supabase.from_('character').delete().eq('id', character_id).execute()
+                return False, f"Failed to create character in game server: {game_response.text}"
 
-            response = self.supabase.from_('character').insert(
-                character_data
-            ).execute()
-            print(f"Create character response: {response.data}")  # Debug print
+            return True, db_response.data[0]
 
-            if not response.data:
-                return False, "Failed to create character in database"
-
-            # Ensure ID is returned as string
-            character = response.data[0]
-            character['id'] = str(character['id'])
-
-            return True, character
         except Exception as e:
-            print(f"Error in create_character: {e}")  # Debug print
+            print(f"Error in create_character: {e}")
             return False, str(e)
 
     def roll_attributes(self, user_id: str) -> Tuple[bool, Dict | str]:
