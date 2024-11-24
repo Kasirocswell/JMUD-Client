@@ -58,14 +58,17 @@ class MUDClient:
                     if isinstance(attributes, str):
                         attributes = json.loads(attributes)
 
-                    # Create request payload
+                    # Create request payload - Now including the ID
                     create_payload = {
+                        "id": player_id,  # Include the existing character ID
                         "ownerId": user_id,
                         "firstName": char_data['first_name'],
-                        "lastName": "",
+                        "lastName": char_data.get('last_name', ''),
                         "race": str(char_data['race']).upper(),
                         "characterClass": str(char_data['class']).upper(),
-                        "attributes": attributes  # Use the actual attributes from Supabase
+                        "attributes": attributes,
+                        # Include current_location if it exists
+                        "currentLocation": char_data.get('current_location')
                     }
                     print(f"Creating character with payload: {create_payload}")
 
@@ -79,7 +82,7 @@ class MUDClient:
                     if create_response.status_code != 200:
                         return False, f"Failed to create character in game state: {create_response.text}"
 
-                    # Get the game server's character ID
+                    # Get the game server's character ID from response
                     game_character = create_response.json()
                     game_character_id = game_character['id']
 
