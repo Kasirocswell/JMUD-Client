@@ -58,17 +58,16 @@ class MUDClient:
                     if isinstance(attributes, str):
                         attributes = json.loads(attributes)
 
-                    # Create request payload - Now including the ID
+                    # Create request payload - updated to use room_name
                     create_payload = {
-                        "id": player_id,  # Include the existing character ID
+                        "id": player_id,
                         "ownerId": user_id,
                         "firstName": char_data['first_name'],
                         "lastName": char_data.get('last_name', ''),
                         "race": str(char_data['race']).upper(),
                         "characterClass": str(char_data['class']).upper(),
                         "attributes": attributes,
-                        # Include current_location if it exists
-                        "currentLocation": char_data.get('current_location')
+                        "currentRoomName": char_data.get('room_name')  # Updated to use room_name
                     }
                     print(f"Creating character with payload: {create_payload}")
 
@@ -80,7 +79,14 @@ class MUDClient:
                     print(f"Create character response: {create_response.status_code}, {create_response.text}")
 
                     if create_response.status_code != 200:
-                        return False, f"Failed to create character in game state: {create_response.text}"
+                        error_message = create_response.text
+                        try:
+                            error_data = create_response.json()
+                            if 'error' in error_data:
+                                error_message = error_data['error']
+                        except Exception:
+                            pass
+                        return False, f"Failed to create character in game state: {error_message}"
 
                     # Get the game server's character ID from response
                     game_character = create_response.json()
@@ -111,10 +117,24 @@ class MUDClient:
             print(f"Join game response: {response.text}")
 
             if response.status_code == 200:
-                data = response.json()
-                self.player_id = player_id  # Store the game server's ID
-                return True, data["message"]
-            return False, f"Failed to join game: {response.text}"
+                try:
+                    data = response.json()
+                    self.player_id = player_id  # Store the game server's ID
+                    return True, data["message"]
+                except Exception as e:
+                    print(f"Error parsing join response: {e}")
+                    return False, f"Error parsing join response: {str(e)}"
+
+            # Try to get detailed error message from response
+            error_message = response.text
+            try:
+                error_data = response.json()
+                if 'error' in error_data:
+                    error_message = error_data['error']
+            except Exception:
+                pass
+            return False, f"Failed to join game: {error_message}"
+
         except Exception as e:
             print(f"Exception in join_game: {str(e)}")
             return False, f"Error joining game: {str(e)}"
