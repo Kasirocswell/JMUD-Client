@@ -7,7 +7,9 @@ import streamlit as st
 from configparser import ConfigParser
 from character_service import CharacterService
 import json
-
+import redis
+import threading
+import queue
 
 
 @dataclass
@@ -16,6 +18,8 @@ class GameConfig:
     base_url: str
     refresh_rate: float
     max_messages: int
+    redis_host: str = "localhost"
+    redis_port: int = 6379
 
     @classmethod
     def from_ini(cls, environment: str = "development") -> "GameConfig":
@@ -26,7 +30,9 @@ class GameConfig:
         return cls(
             base_url=env_config.get("base_url"),
             refresh_rate=env_config.getfloat("refresh_rate"),
-            max_messages=env_config.getint("max_messages")
+            max_messages=env_config.getint("max_messages"),
+            redis_host=env_config.get("redis_host", "localhost"),
+            redis_port=env_config.getint("redis_port", 6379)
         )
 
 
@@ -34,6 +40,23 @@ class MUDClient:
     def __init__(self, config: GameConfig):
         self.config = config
         self.player_id = None
+        self._redis_queue = queue.Queue()  # Create instance-level queue
+
+        # Initialize Redis
+        try:
+            self.redis_client = redis.Redis(
+                host=self.config.redis_host,
+                port=self.config.redis_port,
+                decode_responses=True
+            )
+            self.pubsub = self.redis_client.pubsub(ignore_subscribe_messages=True)
+            self._stop_listening = threading.Event()
+            self.listener_thread = None  # Add this attribute
+            print("Redis connection initialized successfully")
+        except Exception as e:
+            print(f"Failed to initialize Redis connection: {e}")
+            self.redis_client = None
+            self.pubsub = None
 
     def join_game(self, player_id: str, user_id: str) -> tuple[bool, str]:
         """Join game with a character"""
@@ -58,7 +81,7 @@ class MUDClient:
                     if isinstance(attributes, str):
                         attributes = json.loads(attributes)
 
-                    # Create request payload - updated to use room_name
+                    # Create request payload
                     create_payload = {
                         "id": player_id,
                         "ownerId": user_id,
@@ -67,7 +90,7 @@ class MUDClient:
                         "race": str(char_data['race']).upper(),
                         "characterClass": str(char_data['class']).upper(),
                         "attributes": attributes,
-                        "currentRoomName": char_data.get('room_name')  # Updated to use room_name
+                        "currentRoomName": char_data.get('room_name')
                     }
                     print(f"Creating character with payload: {create_payload}")
 
@@ -119,7 +142,10 @@ class MUDClient:
             if response.status_code == 200:
                 try:
                     data = response.json()
-                    self.player_id = player_id  # Store the game server's ID
+                    self.player_id = player_id
+                    # Start Redis subscription if available
+                    if self.redis_client:
+                        self.subscribe_to_redis(player_id)
                     return True, data["message"]
                 except Exception as e:
                     print(f"Error parsing join response: {e}")
@@ -190,6 +216,54 @@ class MUDClient:
         except Exception as e:
             print(f"Exception in send_command: {str(e)}")  # Debug print
             return False, {"message": f"Error sending command: {str(e)}"}
+
+    def start_listener_thread(self):
+        """Ensure the Redis listener thread is running."""
+        if self.listener_thread is None or not self.listener_thread.is_alive():
+            self._stop_listening.clear()
+            self.listener_thread = threading.Thread(target=self.listen_to_redis, daemon=True)
+            self.listener_thread.start()
+
+    def listen_to_redis(self):
+        """Background thread to listen to Redis messages."""
+        try:
+            while not self._stop_listening.is_set():
+                message = self.pubsub.get_message()
+                if message and message['type'] == 'message':
+                    data = message['data']
+                    # Use instance queue instead of session state
+                    self._redis_queue.put(data)
+                    print(f"Added message to queue: {data}")
+                time.sleep(0.1)
+        except Exception as e:
+            print(f"Redis listener error: {e}")
+
+    def subscribe_to_redis(self, player_id: str):
+        """Subscribe to Redis channels for system messages"""
+        if not self.redis_client:
+            return
+
+        # Subscribe to channels
+        print(f"Subscribing to Redis channels for player {player_id}")
+        self.pubsub.subscribe(f"player:{player_id}", "system")
+        self.start_listener_thread()
+
+    # Removed the __del__ method to prevent listener thread from stopping
+    # def __del__(self):
+    #     """Cleanup Redis connections"""
+    #     if hasattr(self, '_stop_listening'):
+    #         self._stop_listening.set()
+    #     if hasattr(self, 'pubsub'):
+    #         try:
+    #             self.pubsub.unsubscribe()
+    #             self.pubsub.close()
+    #         except:
+    #             pass
+    #     if hasattr(self, 'redis_client'):
+    #         try:
+    #             self.redis_client.close()
+    #         except:
+    #             pass
 
 
 class GameState:

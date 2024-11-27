@@ -1,7 +1,11 @@
+import queue
+
 import streamlit as st
+import time
 from auth_handler import AuthHandler
 from character_service import CharacterService
 from mud_client import MUDClient, GameConfig, GameState
+from streamlit_autorefresh import st_autorefresh
 
 
 def create_terminal_style():
@@ -88,6 +92,11 @@ def create_terminal_style():
             .css-1d391kg {
                 padding-top: 1rem;
             }
+
+            /* Hide our auto-update button */
+            .refresh-button {
+                display: none !important;
+            }
         </style>
     """, unsafe_allow_html=True)
 
@@ -116,166 +125,6 @@ def handle_command():
             st.session_state.game_state.add_message(result.get("message", "Unknown error occurred"), "error")
 
         st.session_state.command_input = ""
-
-
-def render_signup_form(auth_handler: AuthHandler):
-    st.header("Sign Up")
-    with st.form("signup_form"):
-        email = st.text_input("Email", key="signup_email")
-        password = st.text_input("Password", type="password", key="signup_password")
-        confirm_password = st.text_input("Confirm Password", type="password", key="confirm_password")
-        submit = st.form_submit_button("Sign Up")
-
-        if submit:
-            if password != confirm_password:
-                st.error("Passwords do not match!")
-            elif len(password) < 6:
-                st.error("Password must be at least 6 characters long!")
-            else:
-                success, message = auth_handler.sign_up(email, password)
-                if success:
-                    st.success(message)
-                    st.rerun()
-                else:
-                    st.error(message)
-
-    st.button("Already have an account? Sign In", on_click=switch_to_signin)
-
-
-def render_signin_form(auth_handler: AuthHandler):
-    st.header("Sign In")
-    with st.form("signin_form"):
-        email = st.text_input("Email", key="signin_email")
-        password = st.text_input("Password", type="password", key="signin_password")
-        submit = st.form_submit_button("Sign In")
-
-        if submit:
-            success, message = auth_handler.sign_in(email, password)
-            if success:
-                st.success(message)
-                st.rerun()
-            else:
-                st.error(message)
-
-    st.button("Don't have an account? Sign Up", on_click=switch_to_signup)
-
-
-def render_auth_page(auth_handler: AuthHandler):
-    st.title("MUD Game")
-
-    if st.session_state.auth_mode == "signup":
-        render_signup_form(auth_handler)
-    else:
-        render_signin_form(auth_handler)
-
-
-def render_character_creation(auth_handler: AuthHandler, character_service: CharacterService):
-    """Render character creation form"""
-    st.header("Create New Character")
-    with st.form("character_creation"):
-        col1, col2 = st.columns(2)
-
-        with col1:
-            first_name = st.text_input("First Name")
-            race = st.selectbox("Race", ['HUMAN', 'DRACONIAN', 'SYNTH', 'CONSTRUCT', 'ANDROID'])
-
-        with col2:
-            character_class = st.selectbox("Class", ['SOLDIER', 'PILOT', 'HACKER', 'ENGINEER', 'MEDIC'])
-
-            # Show roll results section
-            if 'attribute_rolls' not in st.session_state:
-                st.session_state.attribute_rolls = []
-                st.session_state.roll_count = 0
-
-            if st.form_submit_button("Roll Attributes"):
-                if st.session_state.roll_count < 3:
-                    # Call backend to get roll results
-                    success, result = character_service.roll_attributes(auth_handler.get_current_user().id)
-                    if success:
-                        st.session_state.attribute_rolls.append(result)
-                        st.session_state.roll_count += 1
-
-            # Display rolls if any exist
-            if st.session_state.attribute_rolls:
-                st.write("Your rolls:")
-                for i, roll in enumerate(st.session_state.attribute_rolls):
-                    st.write(f"Roll {i + 1}:", roll)
-
-                # Let user select which roll to use
-                selected_roll = st.selectbox("Select roll to use", range(1, len(st.session_state.attribute_rolls) + 1))
-
-        create_button = st.form_submit_button("Create Character")
-
-        if create_button:
-            if not first_name:
-                st.error("Please enter a character name")
-                return
-
-            if not hasattr(st.session_state, 'attribute_rolls') or not st.session_state.attribute_rolls:
-                st.error("Please roll for attributes first")
-                return
-
-            # Send character creation request to backend
-            success, result = character_service.create_character(
-                owner_id=auth_handler.get_current_user().id,
-                first_name=first_name,
-                race=race,
-                character_class=character_class,
-                attributes=st.session_state.attribute_rolls[selected_roll - 1]
-            )
-
-            if success:
-                st.success("Character created successfully!")
-                # Clear the creation state
-                st.session_state.pop('attribute_rolls', None)
-                st.session_state.pop('roll_count', None)
-                st.session_state.show_character_creation = False
-                st.rerun()
-            else:
-                st.error(result)
-
-
-def render_character_selection(auth_handler: AuthHandler, character_service: CharacterService):
-    st.header("Character Selection")
-
-    # Get user's characters from backend
-    success, result = character_service.get_characters(auth_handler.get_current_user().id)
-
-    if not success:
-        if "Character not found" in result:  # Or whatever error indicates no characters
-            if st.button("Create Your First Character"):
-                st.session_state.show_character_creation = True
-
-            if st.session_state.get('show_character_creation', False):
-                render_character_creation(auth_handler, character_service)
-            return None
-        else:
-            st.error(result)
-            return None
-
-    # Display existing characters
-    characters = result
-    if characters:
-        st.write("Select a character:")
-        print("Debug - Available characters:", characters)  # Debug print
-        for char in characters:
-            col1, col2, col3 = st.columns([3, 2, 1])
-            with col1:
-                st.write(f"{char['first_name']}")
-            with col2:
-                st.write(f"Level {char['level']} {char['race']} {char['class']}")
-            with col3:
-                if st.button("Select", key=f"select_{char['id']}"):
-                    print(f"Debug - Selected character: {char}")  # Debug print
-                    return char  # Just return the character, game interface handles joining
-
-    if st.button("Create New Character"):
-        st.session_state.show_character_creation = True
-
-    if st.session_state.get('show_character_creation', False):
-        render_character_creation(auth_handler, character_service)
-
-    return None
 
 
 def render_game_interface(auth_handler: AuthHandler):
@@ -313,7 +162,7 @@ def render_game_interface(auth_handler: AuthHandler):
     if 'active_character' not in st.session_state:
         character = render_character_selection(auth_handler, st.session_state.character_service)
         if character:
-            print(f"Selected character data: {character}")  # Debug print
+            print(f"Selected character data: {character}")
             # Ensure character ID is string
             character['id'] = str(character['id'])
             st.session_state.active_character = character
@@ -323,7 +172,7 @@ def render_game_interface(auth_handler: AuthHandler):
             # Store user info from auth handler
             st.session_state.user = auth_handler.get_current_user()
             success, message = st.session_state.client.join_game(
-                player_id=str(character['id']),  # Explicitly convert to string
+                player_id=str(character['id']),
                 user_id=auth_handler.get_current_user().id
             )
             if success:
@@ -352,9 +201,26 @@ def render_game_interface(auth_handler: AuthHandler):
             st.session_state.pop('active_character', None)
             st.rerun()
             return
+    else:
+        # Re-initialize the listener thread if necessary
+        if hasattr(st.session_state.client, 'start_listener_thread'):
+            st.session_state.client.start_listener_thread()
+
+    # Automatically refresh the page every 1 second
+    st_autorefresh(interval=1000, key="autorefresh")
 
     # Main game area - only show if character is selected and client is initialized
     st.title("MUD Game Terminal")
+
+    # Add auto-update for Redis messages
+    if hasattr(st.session_state, 'client'):
+        try:
+            msg = st.session_state.client._redis_queue.get_nowait()
+            if msg:
+                print(f"Got Redis message: {msg}")
+                st.session_state.game_state.add_message(msg, "system")
+        except queue.Empty:
+            pass
 
     # Terminal display area
     terminal_html = "<div class='terminal-container'>"
@@ -367,12 +233,164 @@ def render_game_interface(auth_handler: AuthHandler):
     # Command input
     if 'client' in st.session_state:  # Only show input if client is initialized
         st.text_input(
-            "",
+            "Command Input",
             key="command_input",
             placeholder="Enter command...",
             on_change=handle_command,
             label_visibility="collapsed"
         )
+
+
+def render_character_selection(auth_handler: AuthHandler, character_service: CharacterService):
+    st.header("Character Selection")
+
+    # Get user's characters from backend
+    success, result = character_service.get_characters(auth_handler.get_current_user().id)
+
+    if not success:
+        if "Character not found" in result:  # Or whatever error indicates no characters
+            if st.button("Create Your First Character"):
+                st.session_state.show_character_creation = True
+
+            if st.session_state.get('show_character_creation', False):
+                render_character_creation(auth_handler, character_service)
+            return None
+        else:
+            st.error(result)
+            return None
+
+    # Display existing characters
+    characters = result
+    if characters:
+        st.write("Select a character:")
+        print("Debug - Available characters:", characters)
+        for char in characters:
+            col1, col2, col3 = st.columns([3, 2, 1])
+            with col1:
+                st.write(f"{char['first_name']}")
+            with col2:
+                st.write(f"Level {char['level']} {char['race']} {char['class']}")
+            with col3:
+                if st.button("Select", key=f"select_{char['id']}"):
+                    print(f"Debug - Selected character: {char}")
+                    return char
+
+    if st.button("Create New Character"):
+        st.session_state.show_character_creation = True
+
+    if st.session_state.get('show_character_creation', False):
+        render_character_creation(auth_handler, character_service)
+
+    return None
+
+
+def render_character_creation(auth_handler: AuthHandler, character_service: CharacterService):
+    """Render character creation form"""
+    st.header("Create New Character")
+    with st.form("character_creation"):
+        col1, col2 = st.columns(2)
+
+        with col1:
+            first_name = st.text_input("First Name")
+            race = st.selectbox("Race", ['HUMAN', 'DRACONIAN', 'SYNTH', 'CONSTRUCT', 'ANDROID'])
+
+        with col2:
+            character_class = st.selectbox("Class", ['SOLDIER', 'PILOT', 'HACKER', 'ENGINEER', 'MEDIC'])
+
+            if 'attribute_rolls' not in st.session_state:
+                st.session_state.attribute_rolls = []
+                st.session_state.roll_count = 0
+
+            if st.form_submit_button("Roll Attributes"):
+                if st.session_state.roll_count < 3:
+                    success, result = character_service.roll_attributes(auth_handler.get_current_user().id)
+                    if success:
+                        st.session_state.attribute_rolls.append(result)
+                        st.session_state.roll_count += 1
+
+            if st.session_state.attribute_rolls:
+                st.write("Your rolls:")
+                for i, roll in enumerate(st.session_state.attribute_rolls):
+                    st.write(f"Roll {i + 1}:", roll)
+                selected_roll = st.selectbox("Select roll to use", range(1, len(st.session_state.attribute_rolls) + 1))
+
+        create_button = st.form_submit_button("Create Character")
+
+        if create_button:
+            if not first_name:
+                st.error("Please enter a character name")
+                return
+            if not st.session_state.attribute_rolls:
+                st.error("Please roll for attributes first")
+                return
+
+            success, result = character_service.create_character(
+                owner_id=auth_handler.get_current_user().id,
+                first_name=first_name,
+                race=race,
+                character_class=character_class,
+                attributes=st.session_state.attribute_rolls[selected_roll - 1]
+            )
+
+            if success:
+                st.success("Character created successfully!")
+                st.session_state.pop('attribute_rolls', None)
+                st.session_state.pop('roll_count', None)
+                st.session_state.show_character_creation = False
+                st.rerun()
+            else:
+                st.error(result)
+
+
+def render_auth_page(auth_handler: AuthHandler):
+    st.title("MUD Game")
+
+    if st.session_state.auth_mode == "signup":
+        render_signup_form(auth_handler)
+    else:
+        render_signin_form(auth_handler)
+
+
+def render_signin_form(auth_handler: AuthHandler):
+    st.header("Sign In")
+    with st.form("signin_form"):
+        email = st.text_input("Email", key="signin_email")
+        password = st.text_input("Password", type="password", key="signin_password")
+        submit = st.form_submit_button("Sign In")
+
+        if submit:
+            success, message = auth_handler.sign_in(email, password)
+            if success:
+                st.success(message)
+                st.rerun()
+            else:
+                st.error(message)
+
+    st.button("Don't have an account? Sign Up", on_click=switch_to_signup)
+
+
+def render_signup_form(auth_handler: AuthHandler):
+    st.header("Sign Up")
+    with st.form("signup_form"):
+        email = st.text_input("Email", key="signup_email")
+        password = st.text_input("Password", type="password", key="signup_password")
+        confirm_password = st.text_input("Confirm Password", type="password", key="confirm_password")
+        submit = st.form_submit_button("Sign Up")
+
+        if submit:
+            if password != confirm_password:
+                st.error("Passwords do not match!")
+            elif len(password) < 6:
+                st.error("Password must be at least 6 characters long!")
+            else:
+                success, message = auth_handler.sign_up(email, password)
+                if success:
+                    st.success(message)
+                    st.rerun()
+                else:
+                    st.error(message)
+
+    st.button("Already have an account? Sign In", on_click=switch_to_signin)
 
 
 def main():
