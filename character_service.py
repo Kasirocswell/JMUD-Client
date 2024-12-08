@@ -13,6 +13,20 @@ class CharacterService:
             os.getenv('SUPABASE_KEY')
         )
 
+    def update_location(self, character_id: str, room_name: str) -> Tuple[bool, str]:
+        """Update character's location in Supabase"""
+        try:
+            response = self.supabase.table('character').update({
+                'room_name': room_name
+            }).eq('id', character_id).execute()
+
+            if not response.data:
+                return False, "Failed to update location"
+            return True, "Location updated successfully"
+        except Exception as e:
+            print(f"Error updating location: {e}")
+            return False, str(e)
+
     def get_characters(self, owner_id: str) -> Tuple[bool, List[Dict] | str]:
         try:
             response = self.supabase.from_('character').select(

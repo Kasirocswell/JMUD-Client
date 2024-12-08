@@ -166,17 +166,9 @@ class MUDClient:
             return False, f"Error joining game: {str(e)}"
 
     def send_command(self, command: str) -> tuple[bool, dict]:
-        """Send a command to the game server"""
         try:
             if not self.player_id:
                 return False, {"message": "Not connected to game"}
-
-            # Parse command into command name and args
-            parts = command.strip().split(maxsplit=1)
-            command_name = parts[0].lower()
-            args = parts[1] if len(parts) > 1 else ""
-
-            print(f"Sending command: {command_name}, args: {args}")  # Debug print
 
             response = requests.post(
                 f"{self.config.base_url}/game/command",
@@ -185,11 +177,28 @@ class MUDClient:
                     "command": command
                 }
             )
-            print(f"Command response: {response.text}")  # Debug print
 
             if response.status_code == 200:
                 result = response.json()
-                # Extract the result message from the CommandResult
+                # Handle room changes for movement commands
+                if command.lower().startswith("move ") and 'result' in result:
+                    try:
+                        # Get new room name from privateMessage first line
+                        private_msg = result['result'].get('privateMessage', '')
+                        if private_msg:
+                            new_room = private_msg.split('\n')[0]
+                            print(f"Moving to new room: {new_room}")
+                            # Update location in Supabase
+                            char_service = CharacterService(self.config.base_url)
+                            success, msg = char_service.update_location(self.player_id, new_room)
+                            if not success:
+                                print(f"Failed to update location in database: {msg}")
+                            # Resubscribe to Redis channels with new room
+                            self.subscribe_to_redis(self.player_id, current_room=new_room)
+                    except Exception as e:
+                        print(f"Error updating room subscription or database: {e}")
+
+                # Existing result handling
                 if 'result' in result:
                     message = result['result'].get('message', '')
                     success = result['result'].get('success', False)
@@ -204,7 +213,6 @@ class MUDClient:
                     }
                 return True, result
 
-            # Handle error responses
             try:
                 error_data = response.json()
                 error_msg = error_data.get('error', f"Command failed: {response.text}")
@@ -214,7 +222,7 @@ class MUDClient:
             return False, {"message": error_msg}
 
         except Exception as e:
-            print(f"Exception in send_command: {str(e)}")  # Debug print
+            print(f"Exception in send_command: {str(e)}")
             return False, {"message": f"Error sending command: {str(e)}"}
 
     def start_listener_thread(self):
@@ -238,32 +246,38 @@ class MUDClient:
         except Exception as e:
             print(f"Redis listener error: {e}")
 
-    def subscribe_to_redis(self, player_id: str):
+    def subscribe_to_redis(self, player_id: str, current_room: str = None):
         """Subscribe to Redis channels for system messages"""
         if not self.redis_client:
             return
 
         # Subscribe to channels
         print(f"Subscribing to Redis channels for player {player_id}")
-        self.pubsub.subscribe(f"player:{player_id}", "system")
-        self.start_listener_thread()
+        channels = [f"player:{player_id}", "system"]
 
-    # Removed the __del__ method to prevent listener thread from stopping
-    # def __del__(self):
-    #     """Cleanup Redis connections"""
-    #     if hasattr(self, '_stop_listening'):
-    #         self._stop_listening.set()
-    #     if hasattr(self, 'pubsub'):
-    #         try:
-    #             self.pubsub.unsubscribe()
-    #             self.pubsub.close()
-    #         except:
-    #             pass
-    #     if hasattr(self, 'redis_client'):
-    #         try:
-    #             self.redis_client.close()
-    #         except:
-    #             pass
+        # Use provided room name if available, otherwise try to get from server
+        if current_room is None:
+            try:
+                response = requests.get(f"{self.config.base_url}/game/characters/get/{player_id}")
+                if response.status_code == 200:
+                    player_data = response.json()
+                    current_room = player_data.get('roomName')
+            except Exception as e:
+                print(f"Error getting player room: {e}")
+
+        if current_room:
+            room_channel = f"room:{current_room.replace(' ', '_')}"
+            channels.append(room_channel)
+            print(f"Adding room channel: {room_channel}")
+
+        # Unsubscribe from existing subscriptions
+        if self.pubsub.patterns:
+            self.pubsub.punsubscribe()
+        if self.pubsub.channels:
+            self.pubsub.unsubscribe()
+
+        self.pubsub.subscribe(*channels)
+        self.start_listener_thread()
 
 
 class GameState:
