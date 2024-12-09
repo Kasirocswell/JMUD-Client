@@ -1,125 +1,111 @@
 import queue
-
 import streamlit as st
 import time
 from auth_handler import AuthHandler
 from character_service import CharacterService
 from mud_client import MUDClient, GameConfig, GameState
 from streamlit_autorefresh import st_autorefresh
-
-
-def create_terminal_style():
-    """Add custom CSS for terminal-like appearance"""
-    st.markdown("""
-        <style>
-            /* Page layout fixes */
-            .block-container {
-                padding-top: 1rem !important;
-                padding-bottom: 0rem !important;
-                margin-bottom: 0rem !important;
-            }
-
-            /* Hide unnecessary padding */
-            .appview-container .main .block-container {
-                padding: 1rem 1rem 0rem 1rem;
-                max-width: unset;
-            }
-
-            .stApp > header {
-                display: none;
-            }
-
-            /* Terminal container */
-            .terminal-container {
-                background-color: black;
-                color: #00ff00;
-                font-family: 'Courier New', Courier, monospace;
-                padding: 10px;
-                height: 70vh;
-                overflow-y: auto;
-                margin-bottom: 0.5rem;
-                border-radius: 5px;
-            }
-
-            /* Message styles */
-            .terminal-message {
-                margin: 0;
-                padding: 2px 0;
-                white-space: pre-wrap;
-                word-wrap: break-word;
-            }
-
-            .system-message { color: #00ff00; }
-            .private-message { color: #00ffff; }
-            .room-message { color: #ffff00; }
-            .error-message { color: #ff0000; }
-
-            /* Command input styling */
-            .stTextInput > div > div {
-                padding: 0;
-            }
-
-            .stTextInput input {
-                font-family: 'Courier New', Courier, monospace;
-                background-color: black;
-                color: #00ff00;
-                border: 1px solid #00ff00;
-                padding: 0.5rem;
-                border-radius: 5px;
-            }
-
-            /* Hide Streamlit elements we don't want */
-            #MainMenu, footer {display: none;}
-            .stDeployButton {display: none;}
-
-            /* Container layout */
-            .main-container {
-                display: flex;
-                flex-direction: column;
-                height: calc(100vh - 2rem);
-                padding: 0;
-                margin: 0;
-            }
-
-            /* Compact title */
-            h1 {
-                margin: 0 !important;
-                padding: 0 !important;
-                font-size: 1.5rem !important;
-            }
-
-            /* Style sidebar */
-            .css-1d391kg {
-                padding-top: 1rem;
-            }
-
-            /* Hide our auto-update button */
-            .refresh-button {
-                display: none !important;
-            }
-        </style>
-    """, unsafe_allow_html=True)
-
+import streamlit.components.v1 as components
 
 def switch_to_signup():
     st.session_state.auth_mode = "signup"
 
-
 def switch_to_signin():
     st.session_state.auth_mode = "signin"
 
+def format_equipment_display(message: str) -> str:
+    """Format equipment display with detailed item information"""
+    lines = message.split('\n')
+
+    formatted = f"""
+Equipment:
+{'-' * 50}
+"""
+
+    # Process each line after the header
+    for line in lines[1:]:
+        if ':' in line:
+            slot, item = line.split(':', 1)
+            item = item.strip()
+            if item == "Empty":
+                formatted += f"{slot:<10} | {item}\n"
+            else:
+                formatted += f"{slot:<10} | {item:<25} | Lvl 1 | 2.5 kg\n"
+
+    return formatted
+
+def format_inventory_display(message: str) -> str:
+    """Format inventory display with detailed item information"""
+    lines = message.split('\n')
+    header = lines[0].strip()
+
+    formatted = f"""
+{header}
+
+"""
+
+    current_type = None
+    for line in lines[1:]:
+        if not line.strip():
+            continue
+
+        if line.endswith(':'):  # Type header
+            if current_type:  # Add space between sections
+                formatted += "\n"
+            current_type = line
+            formatted += f"{current_type}\n"
+        elif line.startswith('  '):  # Item line
+            item = line.strip()
+            if '(x' in item:
+                name, count = item.rsplit(' ', 1)
+                formatted += f"  {name:<25} {count:>5} | Lvl 1 | 150 cr | 2.5 kg\n"
+            else:
+                formatted += f"  {item:<30} | Lvl 1 | 100 cr | 3.0 kg\n"
+
+    return formatted
 
 def handle_command():
     """Handle command input and processing"""
     if st.session_state.command_input and st.session_state.client:
         command = st.session_state.command_input
+        command_parts = command.lower().split()
+
         success, result = st.session_state.client.send_command(command)
         if success:
-            if result.get("privateMessage"):
-                st.session_state.game_state.add_message(result["privateMessage"], "private")
-            if result.get("roomMessage"):
+            if result.get('privateMessage'):
+                message = result["privateMessage"]
+
+                # Format special command outputs
+                if command == "inventory":
+                    message = format_inventory_display(message)
+                elif command == "equipment":
+                    message = format_equipment_display(message)
+
+                st.session_state.game_state.add_message(message, "private")
+
+                # Handle equipment updates
+                if command_parts[0] == "equip" and len(command_parts) > 1:
+                    item_name = " ".join(command_parts[1:])
+                    success, msg = st.session_state.character_service.update_equipment_state(
+                        st.session_state.active_character['id'],
+                        item_name,
+                        True
+                    )
+                    if not success:
+                        print(f"Warning: Failed to update equipment state: {msg}")
+                elif command_parts[0] == "unequip" and len(command_parts) > 1:
+                    slot = command_parts[1]
+                    success, msg = st.session_state.character_service.update_equipment_state(
+                        st.session_state.active_character['id'],
+                        slot,
+                        False
+                    )
+                    if not success:
+                        print(f"Warning: Failed to update equipment state: {msg}")
+
+            if result.get('roomMessage'):
                 st.session_state.game_state.add_message(result["roomMessage"], "room")
-            if result.get("message"):
+            if result.get('message'):
                 st.session_state.game_state.add_message(result["message"], "system")
         else:
             st.session_state.game_state.add_message(result.get("message", "Unknown error occurred"), "error")
@@ -128,16 +114,34 @@ def handle_command():
 
 
 def render_game_interface(auth_handler: AuthHandler):
+    st.markdown("""
+            <style>
+            .block-container {
+                padding-top: 1rem !important;
+                padding-bottom: 0 !important;
+            }
+
+            .element-container {
+                margin-top: -25px;
+            }
+
+            /* Adjusts padding of main content area */
+            .main .block-container {
+                max-width: unset;
+            }
+
+            /* Hide default streamlit padding */
+            .stApp > header {
+                display: none;
+            }
+            </style>
+        """, unsafe_allow_html=True)
+
     user = auth_handler.get_current_user()
 
-    # Initialize game state if not already done
     if "game_state" not in st.session_state:
         st.session_state.game_state = GameState()
 
-    # Create the layout
-    create_terminal_style()
-
-    # Sidebar with user info and logout
     with st.sidebar:
         st.header("User Info")
         st.write(f"Email: {user.email}")
@@ -146,30 +150,23 @@ def render_game_interface(auth_handler: AuthHandler):
         if st.button("Sign Out"):
             success, message = auth_handler.sign_out()
             if success:
-                # Clear session state on logout
                 for key in ['client', 'game_state', 'active_character']:
                     st.session_state.pop(key, None)
                 st.rerun()
             else:
                 st.error(message)
 
-    # Initialize services if needed
     if 'character_service' not in st.session_state:
         config = GameConfig.from_ini()
         st.session_state.character_service = CharacterService(config.base_url)
 
-    # Character selection if no character is active
     if 'active_character' not in st.session_state:
         character = render_character_selection(auth_handler, st.session_state.character_service)
         if character:
-            print(f"Selected character data: {character}")
-            # Ensure character ID is string
             character['id'] = str(character['id'])
             st.session_state.active_character = character
-            # Initialize the game client when character is selected
             config = GameConfig.from_ini()
             st.session_state.client = MUDClient(config)
-            # Store user info from auth handler
             st.session_state.user = auth_handler.get_current_user()
             success, message = st.session_state.client.join_game(
                 player_id=str(character['id']),
@@ -180,17 +177,14 @@ def render_game_interface(auth_handler: AuthHandler):
                 st.rerun()
             else:
                 st.error(message)
-                # Clean up on failure
                 st.session_state.pop('active_character', None)
                 st.session_state.pop('client', None)
                 return
         return
 
-    # Initialize client if missing (e.g., after page refresh)
     if 'client' not in st.session_state and 'active_character' in st.session_state:
         config = GameConfig.from_ini()
         st.session_state.client = MUDClient(config)
-        # Ensure we're using string ID
         player_id = str(st.session_state.active_character['id'])
         success, message = st.session_state.client.join_game(
             player_id=player_id,
@@ -202,36 +196,157 @@ def render_game_interface(auth_handler: AuthHandler):
             st.rerun()
             return
     else:
-        # Re-initialize the listener thread if necessary
         if hasattr(st.session_state.client, 'start_listener_thread'):
             st.session_state.client.start_listener_thread()
 
-    # Automatically refresh the page every 1 second
     st_autorefresh(interval=1000, key="autorefresh")
 
-    # Main game area - only show if character is selected and client is initialized
     st.title("MUD Game Terminal")
 
-    # Add auto-update for Redis messages
+    # Add title styling
+    st.markdown("""
+            <style>
+                /* Title styling for MUD Terminal */
+                h1 {
+                    color: #00ff00 !important;
+                    font-family: 'Courier New', Courier, monospace !important;
+                    margin-bottom: 25px;
+                    text-align: center;
+                }
+            </style>
+        """, unsafe_allow_html=True)
+
     if hasattr(st.session_state, 'client'):
         try:
             msg = st.session_state.client._redis_queue.get_nowait()
             if msg:
-                print(f"Got Redis message: {msg}")
                 st.session_state.game_state.add_message(msg, "system")
         except queue.Empty:
             pass
 
-    # Terminal display area
-    terminal_html = "<div class='terminal-container'>"
-    for message in st.session_state.game_state.get_messages():
-        css_class = f"{message['type']}-message"
-        terminal_html += f"<pre class='terminal-message {css_class}'>[{message['timestamp']}] {message['message']}</pre>"
-    terminal_html += "</div>"
-    st.markdown(terminal_html, unsafe_allow_html=True)
+    terminal_messages_html = ''.join([
+        f"<pre class='terminal-message {message['type']}-message'>[{message['timestamp']}] {message['message']}</pre>"
+        for message in st.session_state.game_state.get_messages()
+    ])
 
-    # Command input
-    if 'client' in st.session_state:  # Only show input if client is initialized
+    html_code = f"""
+    <html>
+    <head>
+    <style>
+    .terminal-container {{
+        background-color: black;
+        color: #00ff00;
+        font-family: 'Courier New', Courier, monospace;
+        padding: 10px;
+        height: 90vh;
+        overflow-y: scroll; 
+        margin: 0 auto;
+        margin-bottom: 25px;
+        border-radius: 5px;
+        display: flex;
+        flex-direction: column;
+        width: 100%;
+        margin-left: auto;
+        margin-right: auto;
+    }}
+    .terminal-container::-webkit-scrollbar {{
+        width: 0; 
+        background: transparent;
+    }}
+    .terminal-container {{
+        scrollbar-width: none; 
+        -ms-overflow-style: none;
+    }}
+    .terminal-message {{
+        margin: 0;
+        padding: 2px 0;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+    }}
+    .system-message {{ color: #00ff00; }}
+    .private-message {{ color: #00ffff; }}
+    .room-message {{ color: #ffff00; }}
+    .error-message {{ color: #ff0000; }}
+    </style>
+    </head>
+    <body>
+    <div class='terminal-container' id='game-terminal'>
+        {terminal_messages_html}
+        <div id='scroll-anchor'></div>
+    </div>
+    <script>
+    const anchor = document.getElementById('scroll-anchor');
+    if (anchor) {{
+        anchor.scrollIntoView({{ block: 'end' }});
+    }}
+    </script>
+    </body>
+    </html>
+    """
+
+    components.html(html_code, height=700, scrolling=True)
+
+    if 'client' in st.session_state:
+        st.markdown("""
+            <style>
+            .stTextInput {
+                width: 100%;
+                margin-left: auto;
+                margin-right: auto;
+                margin-top: 0px;
+            }
+
+            .stTextInput input {
+                background-color: black;
+                color: #00ff00;
+                font-family: 'Courier New', Courier, monospace;
+                border: 1px solid #00ff00;
+            }
+            </style>
+        """, unsafe_allow_html=True)
+
+        # Add sidebar styling
+        st.markdown("""
+                <style>
+                    /* Sidebar styling */
+                    .css-1d391kg {  /* Sidebar container */
+                        background-color: black;
+                    }
+
+                    .css-1d391kg .block-container {
+                        padding-top: 1rem;
+                    }
+
+                    /* Sidebar text */
+                    .css-1d391kg h2 {
+                        color: #00ff00;
+                        font-family: 'Courier New', Courier, monospace;
+                        padding-bottom: 100px;
+                    }
+
+                    .css-1d391kg p {
+                        color: #00ff00;
+                        font-family: 'Courier New', Courier, monospace;
+                    }
+
+                    /* Sidebar button */
+                    .css-1d391kg .stButton button {
+                        background-color: black;
+                        color: #00ff00;
+                        border: 1px solid #00ff00;
+                        font-family: 'Courier New', Courier, monospace;
+                        width: 100%;
+                        margin-top: 25px;
+                    }
+
+                    .css-1d391kg .stButton button:hover {
+                        background-color: #003300;
+                        border: 1px solid #00ff00;
+                    }
+                </style>
+            """, unsafe_allow_html=True)
+
+
         st.text_input(
             "Command Input",
             key="command_input",
@@ -240,18 +355,14 @@ def render_game_interface(auth_handler: AuthHandler):
             label_visibility="collapsed"
         )
 
-
 def render_character_selection(auth_handler: AuthHandler, character_service: CharacterService):
     st.header("Character Selection")
 
-    # Get user's characters from backend
     success, result = character_service.get_characters(auth_handler.get_current_user().id)
-
     if not success:
-        if "Character not found" in result:  # Or whatever error indicates no characters
+        if "Character not found" in result:
             if st.button("Create Your First Character"):
                 st.session_state.show_character_creation = True
-
             if st.session_state.get('show_character_creation', False):
                 render_character_creation(auth_handler, character_service)
             return None
@@ -259,21 +370,45 @@ def render_character_selection(auth_handler: AuthHandler, character_service: Cha
             st.error(result)
             return None
 
-    # Display existing characters
     characters = result
     if characters:
         st.write("Select a character:")
-        print("Debug - Available characters:", characters)
         for char in characters:
-            col1, col2, col3 = st.columns([3, 2, 1])
+            col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
             with col1:
                 st.write(f"{char['first_name']}")
             with col2:
                 st.write(f"Level {char['level']} {char['race']} {char['class']}")
             with col3:
                 if st.button("Select", key=f"select_{char['id']}"):
-                    print(f"Debug - Selected character: {char}")
                     return char
+            with col4:
+                if st.button("Delete", key=f"delete_{char['id']}", type="secondary"):
+                    if st.session_state.get(f"confirm_delete_{char['id']}", False):
+                        success, message = character_service.delete_character(char['id'])
+                        if success:
+                            st.success("Character deleted successfully!")
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error(f"Failed to delete character: {message}")
+                    else:
+                        st.session_state[f"confirm_delete_{char['id']}"] = True
+                        st.warning(f"Are you sure you want to delete {char['first_name']}? This cannot be undone.")
+                        col5, col6 = st.columns(2)
+                        with col5:
+                            if st.button("Yes, delete", key=f"confirm_yes_{char['id']}", type="primary"):
+                                success, message = character_service.delete_character(char['id'])
+                                if success:
+                                    st.success("Character deleted successfully!")
+                                    time.sleep(1)
+                                    st.rerun()
+                                else:
+                                    st.error(f"Failed to delete character: {message}")
+                        with col6:
+                            if st.button("No, cancel", key=f"confirm_no_{char['id']}"):
+                                st.session_state[f"confirm_delete_{char['id']}"] = False
+                                st.rerun()
 
     if st.button("Create New Character"):
         st.session_state.show_character_creation = True
@@ -283,9 +418,7 @@ def render_character_selection(auth_handler: AuthHandler, character_service: Cha
 
     return None
 
-
 def render_character_creation(auth_handler: AuthHandler, character_service: CharacterService):
-    """Render character creation form"""
     st.header("Create New Character")
     with st.form("character_creation"):
         col1, col2 = st.columns(2)
@@ -333,6 +466,10 @@ def render_character_creation(auth_handler: AuthHandler, character_service: Char
             )
 
             if success:
+                spawn_success, spawn_message = character_service.give_starter_items(result['id'])
+                if not spawn_success:
+                    st.error(f"Warning: Failed to give starter items: {spawn_message}")
+
                 st.success("Character created successfully!")
                 st.session_state.pop('attribute_rolls', None)
                 st.session_state.pop('roll_count', None)
@@ -341,7 +478,6 @@ def render_character_creation(auth_handler: AuthHandler, character_service: Char
             else:
                 st.error(result)
 
-
 def render_auth_page(auth_handler: AuthHandler):
     st.title("MUD Game")
 
@@ -349,7 +485,6 @@ def render_auth_page(auth_handler: AuthHandler):
         render_signup_form(auth_handler)
     else:
         render_signin_form(auth_handler)
-
 
 def render_signin_form(auth_handler: AuthHandler):
     st.header("Sign In")
@@ -367,7 +502,6 @@ def render_signin_form(auth_handler: AuthHandler):
                 st.error(message)
 
     st.button("Don't have an account? Sign Up", on_click=switch_to_signup)
-
 
 def render_signup_form(auth_handler: AuthHandler):
     st.header("Sign Up")
@@ -392,7 +526,6 @@ def render_signup_form(auth_handler: AuthHandler):
 
     st.button("Already have an account? Sign In", on_click=switch_to_signin)
 
-
 def main():
     st.set_page_config(
         page_title="MUD Game Client",
@@ -400,19 +533,14 @@ def main():
         initial_sidebar_state="expanded"
     )
 
-    # Initialize authentication
     auth_handler = AuthHandler()
     auth_handler.initialize_session_state()
-
-    # Check for active session
     auth_handler.check_session()
 
-    # Show either auth forms or game interface
     if not auth_handler.is_authenticated():
         render_auth_page(auth_handler)
     else:
         render_game_interface(auth_handler)
-
 
 if __name__ == "__main__":
     main()
